@@ -41,33 +41,47 @@ async def start_cmd(message: types.Message):
 # Function to take the screenshot
 async def take_screenshot(url: str, filename: str):
     async with async_playwright() as p:
-        # Headless Chromium
+        # Launch Headless Chromium
         browser = await p.chromium.launch(headless=True)
-        # Mobile-like viewport 400x800 with realistic User-Agent
+        
+        # User-Agent mobile iPhone + Russian locale and timezone to look human
         context = await browser.new_context(
             viewport={"width": 400, "height": 800},
-            user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1"
+            user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+            locale="ru-RU",
+            timezone_id="Europe/Moscow",
+            extra_http_headers={
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Referer": "https://yandex.ru/"
+            }
         )
         page = await context.new_page()
         
-        # Apply stealth to avoid bot detection
+        # Apply stealth plugin
         try:
             if hasattr(playwright_stealth, 'stealth_async'):
                 await playwright_stealth.stealth_async(page)
             elif hasattr(playwright_stealth, 'stealth'):
-                # Some versions named the function just 'stealth'
                 res = playwright_stealth.stealth(page)
                 if asyncio.iscoroutine(res):
                     await res
         except Exception as stealth_e:
             print(f"Stealth warning: {stealth_e}", flush=True)
+            
+        # Navigate to URL
+        await page.goto(url, wait_until="domcontentloaded")
         
-        await page.goto(url, wait_until="networkidle")
+        # Human-like interaction: Initial wait and simulated scrolling
+        await asyncio.sleep(2.5)
+        await page.mouse.wheel(0, 400)
+        await asyncio.sleep(1.2)
+        await page.mouse.wheel(0, -400)
         
-        # Wait 5 seconds for Yandex Maps and routes to load completely
-        await asyncio.sleep(5)
+        # Give more time for the data/map to load specifically
+        await asyncio.sleep(5.5)
         
-        # Hide cookie banners, overlays and captcha blocks
+        # Hide cookie banners, overlays and captcha leftovers
         await page.evaluate("""
             const hideElements = () => {
                 const selectors = [
@@ -75,27 +89,26 @@ async def take_screenshot(url: str, filename: str):
                     '[class*="cookie"]', 
                     '[class*="popup"]',
                     '.Verification-SmartCaptcha',
-                    '.dist-banner-container'
+                    '.dist-banner-container',
+                    '.Swithcer-Content',
+                    '.MapActionControls-Swithcer'
                 ];
                 selectors.forEach(selector => {
                     try {
                         const elements = document.querySelectorAll(selector);
                         elements.forEach(el => {
+                            el.style.display = 'none';
                             el.style.opacity = '0';
-                            el.style.pointerEvents = 'none';
+                            el.style.visibility = 'hidden';
                         });
                     } catch (e) {}
                 });
             };
             hideElements();
-            // Periodically check for new banners during the wait
             setInterval(hideElements, 1000);
         """)
         
-        # Small additional wait after hiding elements
-        await asyncio.sleep(1)
-        
-        # Taking a screenshot of the 400x800 viewport
+        # Take the screenshot
         await page.screenshot(path=filename)
         await browser.close()
 
@@ -142,7 +155,7 @@ async def bot_polling(app):
             print("Attempting to connect to Telegram...", flush=True)
             await bot.delete_webhook(drop_pending_updates=True)
             await dp.start_polling(bot)
-            break # If polling successfully stops gracefully
+            break
         except Exception as e:
             print(f"Connection failed: {type(e).__name__} - {e}")
             print("Retrying in 5 seconds...", flush=True)
@@ -161,7 +174,10 @@ async def start_background_tasks(app):
 
 async def cleanup_background_tasks(app):
     app['bot_task'].cancel()
-    await app['bot_task']
+    try:
+        await app['bot_task']
+    except asyncio.CancelledError:
+        pass
 
 app.on_startup.append(start_background_tasks)
 app.on_cleanup.append(cleanup_background_tasks)
