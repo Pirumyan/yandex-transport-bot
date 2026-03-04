@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from playwright.async_api import async_playwright
 import playwright_stealth
-from aiohttp import web
+import aiohttp
 import uuid
 
 # Fetch token from environment variables
@@ -138,14 +138,38 @@ async def health_check(request):
 app = web.Application()
 app.router.add_get('/', health_check)
 
+# Self-ping task to prevent Render from sleeping
+async def self_ping():
+    url = os.getenv("RENDER_EXTERNAL_URL")
+    if not url:
+        print("Keep-alive: RENDER_EXTERNAL_URL is not set. Skipping self-ping.", flush=True)
+        return
+
+    print(f"Keep-alive: Starting self-ping task for {url}", flush=True)
+    await asyncio.sleep(60) # Wait for server to fully start
+    
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(url) as response:
+                    print(f"Keep-alive: Ping sent to {url}, status: {response.status}", flush=True)
+            except Exception as e:
+                print(f"Keep-alive: Ping failed: {e}", flush=True)
+            
+            # Ping every 14 minutes (Free tier sleeps after 15 min of inactivity)
+            await asyncio.sleep(14 * 60)
+
 # Attach the bot polling to run in the background when the web server starts
 async def start_background_tasks(app):
     app['bot_task'] = asyncio.create_task(bot_polling(app))
+    app['ping_task'] = asyncio.create_task(self_ping())
 
 async def cleanup_background_tasks(app):
     app['bot_task'].cancel()
+    app['ping_task'].cancel()
     try:
         await app['bot_task']
+        await app['ping_task']
     except asyncio.CancelledError:
         pass
 
