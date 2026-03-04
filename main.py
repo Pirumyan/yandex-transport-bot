@@ -4,7 +4,10 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+try:
+    from playwright_stealth import stealth_async as stealth
+except ImportError:
+    from playwright_stealth import stealth
 from aiohttp import web
 import uuid
 
@@ -51,7 +54,7 @@ async def take_screenshot(url: str, filename: str):
         page = await context.new_page()
         
         # Apply stealth to avoid bot detection
-        await stealth_async(page)
+        await stealth(page)
         
         await page.goto(url, wait_until="networkidle")
         
