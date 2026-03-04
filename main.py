@@ -6,6 +6,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from playwright.async_api import async_playwright
 import playwright_stealth
 import aiohttp
+from aiohttp import web
 import uuid
 
 # Fetch token from environment variables
