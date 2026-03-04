@@ -41,19 +41,25 @@ async def start_cmd(message: types.Message):
 # Function to take the screenshot
 async def take_screenshot(url: str, filename: str):
     async with async_playwright() as p:
-        # Launch Headless Chromium
-        browser = await p.chromium.launch(headless=True)
+        # Launch Chromium with extra args to look less like a bot
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                '--disable-blink-features=AutomationControlled',
+                '--no-sandbox',
+                '--disable-setuid-sandbox'
+            ]
+        )
         
-        # User-Agent mobile iPhone + Russian locale and timezone to look human
+        # Use a high-end Desktop profile (more common for cloud traffic)
         context = await browser.new_context(
-            viewport={"width": 400, "height": 800},
-            user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+            viewport={"width": 1280, "height": 800},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
             locale="ru-RU",
             timezone_id="Europe/Moscow",
             extra_http_headers={
-                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Referer": "https://yandex.ru/"
             }
         )
         page = await context.new_page()
@@ -68,20 +74,27 @@ async def take_screenshot(url: str, filename: str):
                     await res
         except Exception as stealth_e:
             print(f"Stealth warning: {stealth_e}", flush=True)
+
+        # STEP 1: Visit Yandex homepage FIRST to get standard cookies
+        try:
+            await page.goto("https://yandex.ru/", wait_until="networkidle", timeout=30000)
+            await asyncio.sleep(2) # Look at the homepage
+        except:
+            pass # Continue even if home fails
             
-        # Navigate to URL
-        await page.goto(url, wait_until="domcontentloaded")
+        # STEP 2: Navigate to the actual MAP URL
+        await page.goto(url, wait_until="networkidle")
         
-        # Human-like interaction: Initial wait and simulated scrolling
-        await asyncio.sleep(2.5)
-        await page.mouse.wheel(0, 400)
-        await asyncio.sleep(1.2)
-        await page.mouse.wheel(0, -400)
+        # Human-like interaction: Random waits and small scrolls
+        await asyncio.sleep(3 + (asyncio.get_event_loop().time() % 2)) 
+        await page.mouse.wheel(0, 200)
+        await asyncio.sleep(1)
+        await page.mouse.wheel(0, -200)
         
-        # Give more time for the data/map to load specifically
-        await asyncio.sleep(5.5)
+        # Give enough time for the routes to load
+        await asyncio.sleep(5)
         
-        # Hide cookie banners, overlays and captcha leftovers
+        # Hide cookie banners and any leftovers
         await page.evaluate("""
             const hideElements = () => {
                 const selectors = [
@@ -91,25 +104,28 @@ async def take_screenshot(url: str, filename: str):
                     '.Verification-SmartCaptcha',
                     '.dist-banner-container',
                     '.Swithcer-Content',
-                    '.MapActionControls-Swithcer'
+                    '.MapActionControls-Swithcer',
+                    '.Dialog-Content'
                 ];
                 selectors.forEach(selector => {
                     try {
                         const elements = document.querySelectorAll(selector);
                         elements.forEach(el => {
                             el.style.display = 'none';
-                            el.style.opacity = '0';
-                            el.style.visibility = 'hidden';
                         });
                     } catch (e) {}
                 });
             };
             hideElements();
-            setInterval(hideElements, 1000);
+            setInterval(hideElements, 1500);
         """)
         
-        # Take the screenshot
-        await page.screenshot(path=filename)
+        # Take a screenshot of the center of the map
+        # We use a 400x800 clip from the center of the 1280x800 page
+        await page.screenshot(
+            path=filename, 
+            clip={"x": 440, "y": 0, "width": 400, "height": 800}
+        )
         await browser.close()
 
 @dp.message(lambda message: message.text in STOPS.keys())
