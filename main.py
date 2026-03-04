@@ -1,5 +1,6 @@
 import os
 import asyncio
+from datetime import datetime, timedelta, timezone
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
@@ -8,6 +9,40 @@ import playwright_stealth
 import aiohttp
 from aiohttp import web
 import uuid
+
+# Timezone for Yerevan (UTC+4)
+YEREVAN_TZ = timezone(timedelta(hours=4))
+
+# Helper to parse Yandex time and calculate relative minutes
+def format_arrival_time(time_str: str) -> str:
+    time_str = time_str.strip()
+    
+    # If it's already relative (e.g., "5 мин" or "< 1 мин"), return as is
+    if "мин" in time_str or "ч" in time_str:
+        return time_str
+        
+    # If it's absolute (e.g., "07:09")
+    try:
+        now = datetime.now(YEREVAN_TZ)
+        target_time = datetime.strptime(time_str, "%H:%M")
+        
+        # Set target date to today
+        arrival = now.replace(hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0)
+        
+        # If the arrival time is earlier than now, it's likely for the next day (unlikely for buses, but safe)
+        if arrival < now:
+            arrival += timedelta(days=1)
+            
+        diff_minutes = (arrival - now).total_seconds() / 60
+        
+        # Round up like Yandex does
+        diff_rounded = int(diff_minutes + 0.5)
+        
+        if diff_rounded <= 0:
+            return f"{time_str} (сейчас)"
+        return f"{time_str} (через {diff_rounded} мин)"
+    except:
+        return time_str
 
 # Fetch token from environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8697237632:AAH_UMAaucv-OcMZAIpZIzyPBJF-ANIJxEs")
@@ -105,8 +140,9 @@ async def handle_stop_click(message: types.Message):
         else:
             text = f"🚏 *{stop_name}*\n\nБлижайший транспорт:\n"
             for arr in arrivals:
-                # Basic formatting for Telegram
-                text += f"• `{arr['name']}` — *{arr['time']}*\n"
+                # Format time to be relative if absolute
+                display_time = format_arrival_time(arr['time'])
+                text += f"• `{arr['name']}` — *{display_time}*\n"
             
             await message.answer(text, parse_mode="Markdown")
             
