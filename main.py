@@ -86,7 +86,37 @@ async def take_screenshot(url: str, filename: str):
         await page.goto(url, wait_until="networkidle")
         
         # Human-like interaction: Random waits and small scrolls
-        await asyncio.sleep(3 + (asyncio.get_event_loop().time() % 2)) 
+        await asyncio.sleep(4) 
+        
+        # --- NEW: Check for Captcha and try to auto-click ---
+        try:
+            # Look for the SmartCaptcha container
+            captcha_container = await page.query_selector('.Verification-SmartCaptcha')
+            if captcha_container:
+                print("Captcha detected! Attempting to auto-click...", flush=True)
+                # The checkbox is usually inside an iframe
+                iframes = page.frames
+                for frame in iframes:
+                    if "captcha" in frame.url.lower():
+                        # Try to find the checkbox by its typical class or structure
+                        # It's often a div with class 'checkbox__content' or similar
+                        checkbox = await frame.query_selector('.checkbox__content, .checkbox, #captcha-checkbox')
+                        if checkbox:
+                            # Move mouse to the checkbox with some randomization
+                            box = await checkbox.bounding_box()
+                            if box:
+                                x = box['x'] + box['width'] / 2 + (asyncio.get_event_loop().time() % 5)
+                                y = box['y'] + box['height'] / 2 + (asyncio.get_event_loop().time() % 3)
+                                await frame.mouse.move(x, y, steps=10)
+                                await asyncio.sleep(0.5)
+                                await frame.mouse.click(x, y)
+                                print("Checkbox clicked. Waiting for transition...", flush=True)
+                                await asyncio.sleep(5) # Wait for page to reload or map to appear
+                                break
+        except Exception as e:
+            print(f"Auto-click failed: {e}", flush=True)
+
+        # Human-like movement after potential captcha/load
         await page.mouse.wheel(0, 200)
         await asyncio.sleep(1)
         await page.mouse.wheel(0, -200)
@@ -101,7 +131,6 @@ async def take_screenshot(url: str, filename: str):
                     '[class*="banner"]', 
                     '[class*="cookie"]', 
                     '[class*="popup"]',
-                    '.Verification-SmartCaptcha',
                     '.dist-banner-container',
                     '.Swithcer-Content',
                     '.MapActionControls-Swithcer',
