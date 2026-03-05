@@ -15,34 +15,44 @@ YEREVAN_TZ = timezone(timedelta(hours=4))
 
 # Helper to parse Yandex time and calculate relative minutes
 def format_arrival_time(time_str: str) -> str:
-    time_str = time_str.strip()
+    # Split by newline if multiple times provided
+    lines = [line.strip() for line in time_str.split('\n') if line.strip()]
+    formatted_times = []
     
-    # If it's already relative (e.g., "5 мин" or "< 1 мин"), return as is
-    if "мин" in time_str or "ч" in time_str:
-        return time_str
-        
-    # If it's absolute (e.g., "07:09")
-    try:
-        now = datetime.now(YEREVAN_TZ)
-        target_time = datetime.strptime(time_str, "%H:%M")
-        
-        # Set target date to today
-        arrival = now.replace(hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0)
-        
-        # If the arrival time is earlier than now, it's likely for the next day (unlikely for buses, but safe)
-        if arrival < now:
-            arrival += timedelta(days=1)
+    for line in lines:
+        if line == "прибывает":
+            formatted_times.append("сейчас")
+            continue
             
-        diff_minutes = (arrival - now).total_seconds() / 60
-        
-        # Round up like Yandex does
-        diff_rounded = int(diff_minutes + 0.5)
-        
-        if diff_rounded <= 0:
-            return f"{time_str} (сейчас)"
-        return f"{time_str} (через {diff_rounded} мин)"
-    except:
-        return time_str
+        # If it's already relative (e.g., "5 мин" or "< 1 мин"), use as is
+        if "мин" in line or "ч" in line:
+            formatted_times.append(line)
+            continue
+            
+        # If it's absolute (e.g., "07:09")
+        try:
+            now = datetime.now(YEREVAN_TZ)
+            target_time = datetime.strptime(line, "%H:%M")
+            
+            # Set target date to today
+            arrival = now.replace(hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0)
+            
+            # If the arrival time is earlier than now, it's likely for the next day
+            if arrival < now:
+                arrival += timedelta(days=1)
+                
+            diff_minutes = (arrival - now).total_seconds() / 60
+            diff_rounded = int(diff_minutes + 0.5)
+            
+            if diff_rounded <= 0:
+                formatted_times.append(f"{line} (сейчас)")
+            else:
+                formatted_times.append(f"{line} (через {diff_rounded} мин)")
+        except:
+            formatted_times.append(line)
+            
+    # Join multiple times with a bullet or slash for better look
+    return " • ".join(formatted_times)
 
 # Fetch token from environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8697237632:AAH_UMAaucv-OcMZAIpZIzyPBJF-ANIJxEs")
@@ -136,13 +146,13 @@ async def handle_stop_click(message: types.Message):
         arrivals = await get_arrival_times(url)
         
         if not arrivals:
-            await message.answer(f"🚏 {stop_name}:\nК сожалению, сейчас нет данных о прибывающем транспорте.")
+            await message.answer(f"🚏 *{stop_name}*\n\nНикаких данных о транспорте сейчас нет. Попробуй чуть позже или проверь карту вручную.")
         else:
             text = f"🚏 *{stop_name}*\n\nБлижайший транспорт:\n"
             for arr in arrivals:
-                # Format time to be relative if absolute
                 display_time = format_arrival_time(arr['time'])
-                text += f"• `{arr['name']}` — *{display_time}*\n"
+                # Use a code block for the bus number to make it stand out
+                text += f"• `{arr['name']:>3}` — *{display_time}*\n"
             
             await message.answer(text, parse_mode="Markdown")
             
