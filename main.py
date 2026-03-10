@@ -12,12 +12,14 @@ from aiohttp import web
 # Timezone for Yerevan (UTC+4)
 YEREVAN_TZ = timezone(timedelta(hours=4))
 
-# Global cache for arrivals
+# Keep a short cache to prevent concurrent load OOM issues
 CACHE = {
-    "Комитас 🏛️": None,
-    "Сарян 🎨": None
+    "Комитас 🏛️": {"data": None, "timestamp": None},
+    "Сарян 🎨": {"data": None, "timestamp": None}
 }
+CACHE_TTL = timedelta(seconds=90) # Store cache for 1.5 minutes
 
+# Helper to parse Yandex time and calculate relative minutes
 def format_arrival_time(time_str: str) -> str:
     lines = [line.strip() for line in time_str.split('\n') if line.strip()]
     formatted_times = []
@@ -72,97 +74,132 @@ def get_keyboard():
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await message.answer(
-        "Привет! Нажми на кнопку остановки, и я моментально пришлю список ближайших автобусов.",
+        "Привет! Нажми на кнопку остановки, и я пришлю скриншот карты с ближайшими автобусами.",
         reply_markup=get_keyboard()
     )
+
+async def get_arrival_times(url: str):
+    async with async_playwright() as p:
+        # Launch Chromium with extra memory limits
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-dev-shm-usage', 
+                '--disable-gpu',
+                '--single-process',
+                '--no-zygote',
+                '--blink-settings=imagesEnabled=false'
+            ]
+        )
+        
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+            locale="ru-RU"
+        )
+        page = await context.new_page()
+        
+        # Блокируем загрузку лишних ресурсов для ускорения
+        async def intercept_route(route):
+            rt = route.request.resource_type
+            if rt in ["image", "media", "font", "stylesheet"]:
+                await route.abort()
+            elif any(domain in route.request.url for domain in ["mc.yandex.ru", "an.yandex.ru", "yandex.ru/ads", "google-analytics"]):
+                await route.abort()
+            else:
+                await route.continue_()
+
+        await page.route("**/*", intercept_route)
+
+        try:
+            if hasattr(playwright_stealth, 'stealth_async'):
+                await playwright_stealth.stealth_async(page)
+        except:
+            pass
+
+        # Skip yandex.ru pre-seeding to save time.
+        # Navigate to the Map URL
+        print(f"Loading {url}...")
+        # Используем domcontentloaded для быстрого старта, так как networkidle ждет слишком долго
+        await page.goto(url, wait_until="domcontentloaded")
+        
+        # Ждем появления элементов вместо фиксированного sleep()
+        try:
+            await page.wait_for_selector('li.masstransit-vehicle-snippet-view', timeout=12000)
+            await asyncio.sleep(0.5) # Небольшая пауза чтобы текст времени подгрузился
+        except Exception as e:
+            print(f"Timeout waiting for vehicles: {e}")
+        
+        arrivals = await page.evaluate("""() => {
+            const items = document.querySelectorAll('li.masstransit-vehicle-snippet-view');
+            return Array.from(items).map(item => {
+                const nameEl = item.querySelector('.masstransit-vehicle-snippet-view__name');
+                const timeEl = item.querySelector('.masstransit-vehicle-snippet-view__prognoses');
+                return {
+                    name: nameEl ? nameEl.innerText.trim() : '?',
+                    time: timeEl ? timeEl.innerText.trim() : '?'
+                };
+            });
+        }""")
+        
+        await browser.close()
+        return arrivals
 
 @dp.message(lambda message: message.text in STOPS.keys())
 async def handle_stop_click(message: types.Message):
     stop_name = message.text
-    arrivals = CACHE.get(stop_name)
+    url = STOPS[stop_name]
     
-    if arrivals is None:
-        await message.answer(f"⏳ Данные для остановки {stop_name} еще загружаются (бот только что запущен). Попробуй через 10-15 секунд...")
-        return
+    # ** CACHE CHECK **
+    cached_info = CACHE.get(stop_name)
+    now = datetime.now()
+    
+    if cached_info and cached_info['data'] is not None and cached_info['timestamp']:
+        if now - cached_info['timestamp'] < CACHE_TTL:
+            arrivals = cached_info['data']
+            diff_secs = int((now - cached_info['timestamp']).total_seconds())
+            
+            if not arrivals:
+                await message.answer(f"🚏 *{stop_name}*\n\nНикаких данных о транспорте сейчас нет. Попробуй чуть позже или проверь карту вручную.\n\n_⚡ Моментальный загруз из кэша (обновлено {diff_secs} сек назад)_", parse_mode="Markdown")
+            else:
+                text = f"🚏 *{stop_name}*\n\nБлижайший транспорт:\n"
+                for arr in arrivals:
+                    display_time = format_arrival_time(arr['time'])
+                    text += f"• `{arr['name']:>3}` — *{display_time}*\n"
+                
+                text += f"\n_⚡ Моментальный загруз из кэша (обновлено {diff_secs} сек назад)_"
+                await message.answer(text, parse_mode="Markdown")
+            return
+            
+    # Need to fetch fresh if absent or stale
+    status_msg = await message.answer(f"⏳ Получаю данные об автобусах для остановки {stop_name} (~30 сек)...")
+    
+    try:
+        arrivals = await get_arrival_times(url)
         
-    if not arrivals:
-        await message.answer(f"🚏 *{stop_name}*\n\nНикаких данных о транспорте сейчас нет. Попробуй чуть позже или проверь карту вручную.")
-    else:
-        text = f"🚏 *{stop_name}*\n\nБлижайший транспорт:\n"
-        for arr in arrivals:
-            display_time = format_arrival_time(arr['time'])
-            text += f"• `{arr['name']:>3}` — *{display_time}*\n"
+        # Update cache
+        CACHE[stop_name]['data'] = arrivals
+        CACHE[stop_name]['timestamp'] = datetime.now()
         
-        await message.answer(text, parse_mode="Markdown")
-
-async def browser_polling_task(app):
-    print("Background browser task started...", flush=True)
-    while True:
+        if not arrivals:
+            await message.answer(f"🚏 *{stop_name}*\n\nНикаких данных о транспорте сейчас нет. Попробуй чуть позже или проверь карту вручную.")
+        else:
+            text = f"🚏 *{stop_name}*\n\nБлижайший транспорт:\n"
+            for arr in arrivals:
+                display_time = format_arrival_time(arr['time'])
+                text += f"• `{arr['name']:>3}` — *{display_time}*\n"
+            
+            await message.answer(text, parse_mode="Markdown")
+            
+    except Exception as e:
+        await message.answer(f"❌ Произошла ошибка при получении данных:\n{e}")
+    finally:
         try:
-            print("Launching persistent browser...", flush=True)
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-                )
-                
-                context = await browser.new_context(
-                    viewport={"width": 1280, "height": 800},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-                    locale="ru-RU"
-                )
-                
-                pages = {}
-                
-                # Fetch a seeded page once
-                try:
-                    seed_page = await context.new_page()
-                    await seed_page.goto("https://yandex.ru/", wait_until="networkidle", timeout=15000)
-                    await seed_page.close()
-                except:
-                    pass
-                
-                for stop_name, url in STOPS.items():
-                    page = await context.new_page()
-                    try:
-                        if hasattr(playwright_stealth, 'stealth_async'):
-                            await playwright_stealth.stealth_async(page)
-                    except:
-                        pass
-                    
-                    print(f"Loading page for {stop_name}...", flush=True)
-                    await page.goto(url, wait_until="networkidle")
-                    pages[stop_name] = page
-                
-                await asyncio.sleep(5)
-                
-                print("Started continuous scraping loop...", flush=True)
-                while True:
-                    for stop_name, page in pages.items():
-                        try:
-                            arrivals = await page.evaluate("""() => {
-                                const items = document.querySelectorAll('li.masstransit-vehicle-snippet-view');
-                                return Array.from(items).map(item => {
-                                    const nameEl = item.querySelector('.masstransit-vehicle-snippet-view__name');
-                                    const timeEl = item.querySelector('.masstransit-vehicle-snippet-view__prognoses');
-                                    return {
-                                        name: nameEl ? nameEl.innerText.trim() : '?',
-                                        time: timeEl ? timeEl.innerText.trim() : '?'
-                                    };
-                                });
-                            }""")
-                            CACHE[stop_name] = arrivals
-                        except Exception as eval_err:
-                            print(f"Error evaluating page for {stop_name}: {eval_err}", flush=True)
-                            # If page is totally broken, exit inner loop to recreate browser
-                            raise eval_err
-                    
-                    # Wait 5 seconds before next scrape
-                    await asyncio.sleep(5)
-                    
-        except Exception as e:
-            print(f"Browser task error: {e}. Restarting browser in 5 seconds...", flush=True)
-            await asyncio.sleep(5)
+            await status_msg.delete()
+        except:
+            pass
 
 async def bot_polling(app):
     print("Background bot task started...", flush=True)
@@ -200,16 +237,13 @@ async def self_ping():
 
 async def start_background_tasks(app):
     app['bot_task'] = asyncio.create_task(bot_polling(app))
-    app['browser_task'] = asyncio.create_task(browser_polling_task(app))
     app['ping_task'] = asyncio.create_task(self_ping())
 
 async def cleanup_background_tasks(app):
     app['bot_task'].cancel()
-    app['browser_task'].cancel()
     app['ping_task'].cancel()
     try:
         await app['bot_task']
-        await app['browser_task']
         await app['ping_task']
     except asyncio.CancelledError:
         pass
