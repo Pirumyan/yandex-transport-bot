@@ -12,13 +12,6 @@ from aiohttp import web
 # Timezone for Yerevan (UTC+4)
 YEREVAN_TZ = timezone(timedelta(hours=4))
 
-# Keep a short cache to prevent concurrent load OOM issues
-CACHE = {
-    "Комитас 🏛️": {"data": None, "timestamp": None},
-    "Сарян 🎨": {"data": None, "timestamp": None}
-}
-CACHE_TTL = timedelta(seconds=90) # Store cache for 1.5 minutes
-
 # Helper to parse Yandex time and calculate relative minutes
 def format_arrival_time(time_str: str) -> str:
     lines = [line.strip() for line in time_str.split('\n') if line.strip()]
@@ -152,36 +145,10 @@ async def handle_stop_click(message: types.Message):
     stop_name = message.text
     url = STOPS[stop_name]
     
-    # ** CACHE CHECK **
-    cached_info = CACHE.get(stop_name)
-    now = datetime.now()
-    
-    if cached_info and cached_info['data'] is not None and cached_info['timestamp']:
-        if now - cached_info['timestamp'] < CACHE_TTL:
-            arrivals = cached_info['data']
-            diff_secs = int((now - cached_info['timestamp']).total_seconds())
-            
-            if not arrivals:
-                await message.answer(f"🚏 *{stop_name}*\n\nНикаких данных о транспорте сейчас нет. Попробуй чуть позже или проверь карту вручную.\n\n_⚡ Моментальный загруз из кэша (обновлено {diff_secs} сек назад)_", parse_mode="Markdown")
-            else:
-                text = f"🚏 *{stop_name}*\n\nБлижайший транспорт:\n"
-                for arr in arrivals:
-                    display_time = format_arrival_time(arr['time'])
-                    text += f"• `{arr['name']:>3}` — *{display_time}*\n"
-                
-                text += f"\n_⚡ Моментальный загруз из кэша (обновлено {diff_secs} сек назад)_"
-                await message.answer(text, parse_mode="Markdown")
-            return
-            
-    # Need to fetch fresh if absent or stale
-    status_msg = await message.answer(f"⏳ Получаю данные об автобусах для остановки {stop_name} (~30 сек)...")
+    status_msg = await message.answer(f"⏳ Разведываю карту для остановки {stop_name} (~5-10 сек)...")
     
     try:
         arrivals = await get_arrival_times(url)
-        
-        # Update cache
-        CACHE[stop_name]['data'] = arrivals
-        CACHE[stop_name]['timestamp'] = datetime.now()
         
         if not arrivals:
             await message.answer(f"🚏 *{stop_name}*\n\nНикаких данных о транспорте сейчас нет. Попробуй чуть позже или проверь карту вручную.")
